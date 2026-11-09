@@ -12,6 +12,9 @@ constexpr const int RETRY_DELAY = 2000;
 constexpr const int WIFI_RETRY_DELAY = 500;
 constexpr const int SAMPLE_PERIOD = 500;
 
+constexpr const u_int8_t FREQUENCY_HZ = 50;
+constexpr const u_int8_t INTERVAL_MS = (1000 / (FREQUENCY_HZ + 1));
+
 #if defined(ENV_WOKWI)
 // WiFi constants
 constexpr const char *WIFI_SSID = "Wokwi-GUEST";
@@ -42,6 +45,7 @@ QueueHandle_t queue;
 // Function definition
 void mqttTask(void *parameter);
 void sensorTask(void *parameter);
+void dataStreamTask(void *parameter);
 
 void connectWifi();
 void connectMQTT();
@@ -119,8 +123,11 @@ void setup()
   connectMQTT();
 
   // Task initialization
+  #if defined(DATA_STREAM)
+  xTaskCreate(dataStreamTask, "SensorTask", 4096, nullptr, 1, nullptr);
+  #else
   xTaskCreate(sensorTask, "SensorTask", 4096, nullptr, 1, nullptr);
-
+  #endif
   // MQTT/NETWORK task pinnned to core 0 alongside WI-FI stack (Priority 1)
   xTaskCreatePinnedToCore(mqttTask, "MqttTask", 8192, NULL, 1, NULL, 0);
 }
@@ -295,4 +302,23 @@ bool configureAccelerometer() {
   accelerometer.setRange(ADXL345_RANGE_2_G);
   Serial.println("ADXL345 ready");
   return true;
+}
+
+void dataStreamTask(void *parameter) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+
+  for (;;)
+  {
+    // Reading event verification callback;
+    sensors_event_t event;
+    if (!accelerometer.getEvent(&event)) {
+      Serial.println("Failed to read ADXL345");
+      configureAccelerometer();
+      continue;
+    }
+    
+    Serial.printf("%.2f,%.2f,%.2f\n", event.acceleration.x, event.acceleration.y, event.acceleration.y);
+
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(INTERVAL_MS));
+  }
 }
