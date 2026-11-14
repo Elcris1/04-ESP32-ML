@@ -126,6 +126,10 @@ void setup()
   #if defined(DATA_STREAM)
   xTaskCreate(dataStreamTask, "SensorTask", 4096, nullptr, 1, nullptr);
   #else
+  // Initialize external network connections
+  connectWifi();
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  connectMQTT();
   xTaskCreate(sensorTask, "SensorTask", 4096, nullptr, 1, nullptr);
   #endif
   // MQTT/NETWORK task pinnned to core 0 alongside WI-FI stack (Priority 1)

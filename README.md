@@ -1,12 +1,23 @@
-# ESP32 MQTT Accelerometer
+# ESP32 MQTT Accelerometer + ML
 
-The project reads an ADXL345 accelerometer with an ESP32 and publishes orientation changes over MQTT. It uses PlatformIO with two environments configured in `platformio.ini`.
+The project reads an ADXL345 accelerometer with an ESP32, using a self-made Edge-Impulse ML model the accelerometer data its classified and then published through MQTT. It uses PlatformIO with different setups configured in `platformio.ini` so the program can be used for normal/moked usage and data gathering/inference.
 
 ## Requirements
 
 - PlatformIO Core or the PlatformIO IDE extension
 - An ESP32 board
 - An ADXL345 connected over I²C (SDA: GPIO 21, SCL: GPIO 22)
+
+## How to gather data for Edge Impulse:
+Install the cli to manage Edge Impulse through the terminal
+```bash
+npm install -g edge-impulse-cli
+```
+then run
+```bash
+edge-impulse-data-forwarder
+```
+Configure the Edge Impulse project so it properly recieves the information and label each received data to create the model.
 
 ## Wokwi environment
 

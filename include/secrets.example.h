@@ -8,3 +8,4 @@ constexpr const char *WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 // Optional MQTT credentials. Leave empty if the broker requires no login.
 constexpr const char *MQTT_USER = "";
 constexpr const char *MQTT_PASSWORD = "";
+constexpr const char *MQTT_CLIENT_ID = "ESP32";
