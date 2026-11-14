@@ -44,9 +44,8 @@ PubSubClient mqttClient(wifiClient);
 Adafruit_ADXL345_Unified accelerometer = Adafruit_ADXL345_Unified(12345);
 
 // Communication variables
-QueueHandle_t queue;
+QueueHandle_t mqttQueue;
 QueueHandle_t sensorQueue;
-
 
 //sensor task stores INPUT_FRAME_SIZE in CLASSIFIER_INTERVAL time
 //once it has the INPUT_FRAME_SIZE it sendes the value to the buffer
@@ -96,11 +95,9 @@ const char *orientationName(Orientation orientation)
   }
 }
 
-struct SensorData {
-  float x;
-  float y;
-  float z;
-  Orientation orientation;
+struct InferenceResult {
+  const char *label;
+  float value;
 };
 
 struct AccelSample {
@@ -123,9 +120,8 @@ void setup()
     delay(1000);
   }
 
-  queue = xQueueCreate(10, sizeof(SensorData));
-
-  if (queue == nullptr) {
+  mqttQueue = xQueueCreate(10, sizeof(InferenceResult));
+  if (mqttQueue == nullptr) {
     Serial.println("There was an error creating the mqtt queue");
     return;
   }
@@ -190,7 +186,7 @@ void sensorTask(void *parameter)
     };
 
     if (xQueueSend(sensorQueue, &sample, 0) != pdPASS) {
-
+      //TODO: handle queue send error
     }
 
     // Wait untill next sample
@@ -241,21 +237,29 @@ void inferenceTask(void *parameter) {
           bestIdx = j;
         }
       }
-      const char *resultLabel = result.classification[bestIdx].label;
-      float maxScore = result.classification[bestIdx].value;
 
-      if (previousResult != nullptr && strcmp(previousResult, resultLabel) == 0)  {
+      InferenceResult infResult = {
+        result.classification[bestIdx].label,
+        result.classification[bestIdx].value
+      };
+
+      if (previousResult != nullptr && strcmp(previousResult, infResult.label) == 0)  {
         repeatedResults++;
       } else {
         repeatedResults = 1;
-        previousResult = resultLabel;
+        previousResult = infResult.label;
       }
 
       if (repeatedResults >= 3) {
         Serial.printf("Inference result %s: %.3f\n",
-          resultLabel,
-          maxScore
+          infResult.label,
+          infResult.value
         );
+
+        if (xQueueSend(mqttQueue, &infResult, 0) != pdPASS) {
+          // TODO: handle q send error;
+        }
+        
       }
 
     }
@@ -267,10 +271,7 @@ void inferenceTask(void *parameter) {
  */
 void mqttTask(void *parameter)
 {
-
-  SensorData prev{};
-  bool hasPrev = false;
-  SensorData current{};
+  InferenceResult current{};
 
   for (;;)
   {
@@ -288,25 +289,22 @@ void mqttTask(void *parameter)
     mqttClient.loop();
 
     // if sensor data has been received
-    if (xQueueReceive(queue, &current, pdMS_TO_TICKS(SAMPLE_PERIOD)) == pdTRUE)
+    if (xQueueReceive(mqttQueue, &current, pdMS_TO_TICKS(SAMPLE_PERIOD)) == pdTRUE)
     {
-      if (hasPrev && prev.orientation != current.orientation)
+  
+      char payload[100];
+      snprintf(
+        payload,
+        sizeof(payload),
+        "{\"movement_type\":\"%s\", \"confidence\": %.3f}",
+        current.label, current.value
+      );
+
+      if (mqttClient.publish("ESP32/ADXL345/", payload))
       {
-
-        char payload[100];
-        snprintf(
-            payload,
-            sizeof(payload),
-            "{\"orientation\":\"%s\", \"x\": %.2f, \"y\": %.2f, \"z\": %.2f}",
-            orientationName(current.orientation), current.x, current.y, current.z);
-
-        if (mqttClient.publish("ESP32/ADXL345/", payload))
-        {
-          Serial.println("MQTT message sent!");
-        }
+        Serial.println("MQTT message sent!");
       }
-      prev = current;
-      hasPrev = true;
+
     }
 
     vTaskDelay(pdMS_TO_TICKS(TASK_DELAY));
