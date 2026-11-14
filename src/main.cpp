@@ -2,10 +2,13 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <freertos/FreeRTOS.h>
-
+#include <string.h>
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_ADXL345_U.h>
+
+//inference
+#include <ADXL_classification_inferencing.h>
 
 constexpr const int TASK_DELAY = 1000;
 constexpr const int RETRY_DELAY = 2000;
@@ -35,18 +38,31 @@ constexpr const char *MQTT_SERVER = "192.168.0.30";
 constexpr const int MQTT_PORT = 1883;
 #endif
 
+// Connection initialization
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
-
 Adafruit_ADXL345_Unified accelerometer = Adafruit_ADXL345_Unified(12345);
 
+// Communication variables
 QueueHandle_t queue;
+QueueHandle_t sensorQueue;
 
-// Function definition
-void mqttTask(void *parameter);
-void sensorTask(void *parameter);
-void dataStreamTask(void *parameter);
 
+//sensor task stores INPUT_FRAME_SIZE in CLASSIFIER_INTERVAL time
+//once it has the INPUT_FRAME_SIZE it sendes the value to the buffer
+// when the inference task receives the buffer it receives the data and inferes de result
+// when it finishes it sends the data to the mqtt task using a queue
+// the mqtt data sends the data throguh mqtt 
+
+// Assignment function definition
+void sensorTask(void *parameter); //sensor reading task for inference configuration
+void inferenceTask(void *parameter); //inference task
+void mqttTask(void *parameter); // data publication through mqtt
+
+// Dataset generation function definition
+void dataStreamTask(void *parameter); 
+
+// Robustness methods
 void connectWifi();
 void connectMQTT();
 bool configureAccelerometer();
@@ -57,19 +73,9 @@ enum class Orientation
   UP,
   DOWN,
   LEFT,
-  RIGHT
+  RIGHT,
+  IDLE
 };
-
-Orientation classifyOrientation(float x, float y)
-{
-
-  if (fabsf(x) > fabsf(y))
-  {
-    return x < 0 ? Orientation::LEFT : Orientation::RIGHT;
-  }
-
-  return y > 0 ? Orientation::UP : Orientation::DOWN;
-}
 
 const char *orientationName(Orientation orientation)
 {
@@ -83,17 +89,24 @@ const char *orientationName(Orientation orientation)
     return "LEFT";
   case Orientation::RIGHT:
     return "RIGHT";
+  case Orientation::IDLE:
+    return "IDLE";
   default:
     return "UNKNOWN";
   }
 }
 
-struct SensorData
-{
+struct SensorData {
   float x;
   float y;
   float z;
   Orientation orientation;
+};
+
+struct AccelSample {
+  float x;
+  float y;
+  float z;
 };
 
 void setup()
@@ -111,16 +124,17 @@ void setup()
   }
 
   queue = xQueueCreate(10, sizeof(SensorData));
-  if (queue == nullptr)
-  {
-    Serial.println("There was an error creating the queue");
+
+  if (queue == nullptr) {
+    Serial.println("There was an error creating the mqtt queue");
     return;
   }
 
-  // Initialize external network connections
-  connectWifi();
-  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
-  connectMQTT();
+  sensorQueue = xQueueCreate(100, sizeof(AccelSample));
+  if (sensorQueue == nullptr) {
+    Serial.println("There was an error creating the sensor queue");
+    return;
+  }
 
   // Task initialization
   #if defined(DATA_STREAM)
@@ -130,10 +144,18 @@ void setup()
   connectWifi();
   mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
   connectMQTT();
-  xTaskCreate(sensorTask, "SensorTask", 4096, nullptr, 1, nullptr);
+
+  BaseType_t ok;
+  ok = xTaskCreate(sensorTask, "SensorTask", 4096, nullptr, 3, nullptr);
+  configASSERT(ok == pdPASS);
+
+  ok = xTaskCreate(inferenceTask, "InferenceTask", 8192, nullptr, 2, nullptr);
+  configASSERT(ok == pdPASS);
+
+  ok = xTaskCreate(mqttTask, "MqttTask", 8192, nullptr, 1, nullptr);
+  configASSERT(ok == pdPASS);
+
   #endif
-  // MQTT/NETWORK task pinnned to core 0 alongside WI-FI stack (Priority 1)
-  xTaskCreatePinnedToCore(mqttTask, "MqttTask", 8192, NULL, 1, NULL, 0);
 }
 
 void loop()
@@ -142,6 +164,104 @@ void loop()
   vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
+/**
+ * Task that reads the AXL345 information
+ */
+void sensorTask(void *parameter)
+{
+
+  TickType_t lastWakeTime = xTaskGetTickCount();
+
+  for (;;)
+  {
+    // Reading event verification callback;
+    sensors_event_t event;
+    if (!accelerometer.getEvent(&event)) {
+      Serial.println("Failed to read ADXL345");
+      configureAccelerometer();
+      vTaskDelayUntil(&lastWakeTime,  pdMS_TO_TICKS(EI_CLASSIFIER_INTERVAL_MS));
+      continue;
+    }
+
+    AccelSample sample = {
+      event.acceleration.x,
+      event.acceleration.y,
+      event.acceleration.z
+    };
+
+    if (xQueueSend(sensorQueue, &sample, 0) != pdPASS) {
+
+    }
+
+    // Wait untill next sample
+    vTaskDelayUntil(&lastWakeTime,  pdMS_TO_TICKS(EI_CLASSIFIER_INTERVAL_MS));
+  }
+}
+
+void inferenceTask(void *parameter) {
+
+  static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
+  size_t used = 0;
+  AccelSample sample;
+  size_t repeatedResults = 0;
+  const char *previousResult = nullptr;
+
+  for(;;) {
+
+    if (xQueueReceive(sensorQueue, &sample, portMAX_DELAY) != pdPASS) {
+      //TODO: handle queue error
+      continue;
+    }
+    
+    buffer[used++] = sample.x;
+    buffer[used++] = sample.y;
+    buffer[used++] = sample.z;
+
+    if (used != EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE)  {
+      continue;
+    }
+
+    used = 0;
+    signal_t signal;
+    int err = numpy::signal_from_buffer(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
+    if (err != 0) {
+      // TODO: handle error with inference model
+      continue;
+    }
+
+    ei_impulse_result_t result = {};
+    EI_IMPULSE_ERROR status = run_classifier(&signal, &result, false);
+
+    if (status == EI_IMPULSE_OK) {
+      // TODO: handle error with inference model
+      size_t bestIdx = 0;
+      for(size_t j = 0; j < EI_CLASSIFIER_LABEL_COUNT; j++) {
+        if (result.classification[j].value > 
+        result.classification[bestIdx].value) {
+          bestIdx = j;
+        }
+      }
+      const char *resultLabel = result.classification[bestIdx].label;
+      float maxScore = result.classification[bestIdx].value;
+
+      if (previousResult != nullptr && strcmp(previousResult, resultLabel) == 0)  {
+        repeatedResults++;
+      } else {
+        repeatedResults = 1;
+        previousResult = resultLabel;
+      }
+
+      if (repeatedResults >= 3) {
+        Serial.printf("Inference result %s: %.3f\n",
+          resultLabel,
+          maxScore
+        );
+      }
+
+    }
+    
+  }
+}
 /**
  * Task whose purpouse is to publish mqtt information and keep the connection alive
  */
@@ -192,6 +312,29 @@ void mqttTask(void *parameter)
     vTaskDelay(pdMS_TO_TICKS(TASK_DELAY));
   }
 }
+
+
+// DATASET generation task
+void dataStreamTask(void *parameter) {
+  TickType_t lastWakeTime = xTaskGetTickCount();
+
+  for (;;)
+  {
+    // Reading event verification callback;
+    sensors_event_t event;
+    if (!accelerometer.getEvent(&event)) {
+      Serial.println("Failed to read ADXL345");
+      configureAccelerometer();
+      continue;
+    }
+    
+    Serial.printf("%.2f,%.2f,%.2f\n", event.acceleration.x, event.acceleration.y, event.acceleration.z);
+
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(INTERVAL_MS));
+  }
+}
+
+// HELPER FUNCTIONS
 
 /**
  * Blocking method to reconnect to wifi 
@@ -259,42 +402,6 @@ void connectMQTT()
 }
 
 /**
- * Task that reads the AXL345 information
- */
-void sensorTask(void *parameter)
-{
-
-  TickType_t lastWakeTime = xTaskGetTickCount();
-
-  for (;;)
-  {
-    // Reading event verification callback;
-    sensors_event_t event;
-    if (!accelerometer.getEvent(&event)) {
-      Serial.println("Failed to read ADXL345");
-      configureAccelerometer();
-      vTaskDelayUntil(&lastWakeTime,  pdMS_TO_TICKS(SAMPLE_PERIOD));
-      continue;
-    }
-
-    Orientation orientation = classifyOrientation(
-        event.acceleration.x,
-        event.acceleration.y);
-
-    SensorData data = {
-        event.acceleration.x,
-        event.acceleration.y,
-        event.acceleration.z,
-        orientation};
-
-    xQueueSend(queue, &data, pdMS_TO_TICKS(SAMPLE_PERIOD));
-
-    // Wait untill next sample
-    vTaskDelayUntil(&lastWakeTime,  pdMS_TO_TICKS(SAMPLE_PERIOD));
-  }
-}
-
-/**
  * Setting up connection to the accelerometer
  */
 bool configureAccelerometer() {
@@ -306,23 +413,4 @@ bool configureAccelerometer() {
   accelerometer.setRange(ADXL345_RANGE_2_G);
   Serial.println("ADXL345 ready");
   return true;
-}
-
-void dataStreamTask(void *parameter) {
-  TickType_t lastWakeTime = xTaskGetTickCount();
-
-  for (;;)
-  {
-    // Reading event verification callback;
-    sensors_event_t event;
-    if (!accelerometer.getEvent(&event)) {
-      Serial.println("Failed to read ADXL345");
-      configureAccelerometer();
-      continue;
-    }
-    
-    Serial.printf("%.2f,%.2f,%.2f\n", event.acceleration.x, event.acceleration.y, event.acceleration.y);
-
-    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(INTERVAL_MS));
-  }
 }
