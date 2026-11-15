@@ -11,4 +11,5 @@ mosquitto/log/*
 !mosquitto/log/.gitkeep
 
 secrets.h
+*.docx
 

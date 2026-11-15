@@ -34,7 +34,7 @@ constexpr const char *MQTT_PASSWORD = "";
 // Read README.md on how to update the real connection information
 constexpr const int WIFI_CHANNEL = 0;
 
-constexpr const char *MQTT_SERVER = "192.168.0.30";
+constexpr const char *MQTT_SERVER = "192.168.0.19";
 constexpr const int MQTT_PORT = 1883;
 #endif
 
@@ -66,35 +66,6 @@ void connectWifi();
 void connectMQTT();
 bool configureAccelerometer();
 
-// Support data structures and classes
-enum class Orientation
-{
-  UP,
-  DOWN,
-  LEFT,
-  RIGHT,
-  IDLE
-};
-
-const char *orientationName(Orientation orientation)
-{
-  switch (orientation)
-  {
-  case Orientation::UP:
-    return "UP";
-  case Orientation::DOWN:
-    return "DOWN";
-  case Orientation::LEFT:
-    return "LEFT";
-  case Orientation::RIGHT:
-    return "RIGHT";
-  case Orientation::IDLE:
-    return "IDLE";
-  default:
-    return "UNKNOWN";
-  }
-}
-
 struct InferenceResult {
   const char *label;
   float value;
@@ -121,16 +92,10 @@ void setup()
   }
 
   mqttQueue = xQueueCreate(10, sizeof(InferenceResult));
-  if (mqttQueue == nullptr) {
-    Serial.println("There was an error creating the mqtt queue");
-    return;
-  }
+  configASSERT(mqttQueue != nullptr);
 
   sensorQueue = xQueueCreate(100, sizeof(AccelSample));
-  if (sensorQueue == nullptr) {
-    Serial.println("There was an error creating the sensor queue");
-    return;
-  }
+  configASSERT(sensorQueue != nullptr);
 
   // Task initialization
   #if defined(DATA_STREAM)
@@ -199,13 +164,11 @@ void inferenceTask(void *parameter) {
   static float buffer[EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE];
   size_t used = 0;
   AccelSample sample;
-  size_t repeatedResults = 0;
-  const char *previousResult = nullptr;
 
   for(;;) {
 
     if (xQueueReceive(sensorQueue, &sample, portMAX_DELAY) != pdPASS) {
-      //TODO: handle queue error
+      used = 0;
       continue;
     }
     
@@ -222,6 +185,8 @@ void inferenceTask(void *parameter) {
     int err = numpy::signal_from_buffer(buffer, EI_CLASSIFIER_DSP_INPUT_FRAME_SIZE, &signal);
     if (err != 0) {
       // TODO: handle error with inference model
+      Serial.println("Error creating the inference signal");
+      used = 0;
       continue;
     }
 
@@ -229,7 +194,7 @@ void inferenceTask(void *parameter) {
     EI_IMPULSE_ERROR status = run_classifier(&signal, &result, false);
 
     if (status == EI_IMPULSE_OK) {
-      // TODO: handle error with inference model
+
       size_t bestIdx = 0;
       for(size_t j = 0; j < EI_CLASSIFIER_LABEL_COUNT; j++) {
         if (result.classification[j].value > 
@@ -243,23 +208,13 @@ void inferenceTask(void *parameter) {
         result.classification[bestIdx].value
       };
 
-      if (previousResult != nullptr && strcmp(previousResult, infResult.label) == 0)  {
-        repeatedResults++;
-      } else {
-        repeatedResults = 1;
-        previousResult = infResult.label;
-      }
-
-      if (repeatedResults >= 3) {
-        Serial.printf("Inference result %s: %.3f\n",
-          infResult.label,
-          infResult.value
-        );
-
-        if (xQueueSend(mqttQueue, &infResult, 0) != pdPASS) {
-          // TODO: handle q send error;
-        }
-        
+      Serial.printf("Inference result %s: %.3f\n",
+        infResult.label,
+        infResult.value
+      );
+      
+      if (xQueueSend(mqttQueue, &infResult, 0) != pdPASS) {
+        // TODO: handle q send error;
       }
 
     }

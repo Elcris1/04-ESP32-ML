@@ -47,7 +47,7 @@
 #include "edge-impulse-sdk/classifier/inferencing_engines/engines.h"
 #include "edge-impulse-sdk/classifier/postprocessing/ei_postprocessing_common.h"
 
-const char* ei_classifier_inferencing_categories_1159725_3[] = { "DOWN", "IDLE", "LEFT", "RIGHT", "UP" };
+const char* ei_classifier_inferencing_categories_1159725_3[] = { "DOWN", "LEFT", "RIGHT", "UP" };
 
 EI_CLASSIFIER_DSP_AXES_INDEX_TYPE ei_dsp_config_1159725_9_axes[] = { 0, 1, 2 };
 const uint32_t ei_dsp_config_1159725_9_axes_size = 3;
@@ -138,7 +138,7 @@ const ei_impulse_t impulse_1159725_3 = {
     .project_name = "ADXL classification",
     .impulse_id = 3,
     .impulse_name = "Impulse #1 - SOL optimizations w rawdata",
-    .deploy_version = 1,
+    .deploy_version = 2,
 
     .nn_input_frame_size = 237,
     .raw_sample_count = 79,
@@ -169,7 +169,7 @@ const ei_impulse_t impulse_1159725_3 = {
     .slices_per_model_window = 4,
 
     .has_anomaly = EI_ANOMALY_TYPE_UNKNOWN,
-    .label_count = 5,
+    .label_count = 4,
     .categories = ei_classifier_inferencing_categories_1159725_3,
     .results_type = EI_CLASSIFIER_TYPE_CLASSIFICATION,
     .freeform_outputs_size = freeform_outputs_1159725_3_size,
